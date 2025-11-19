@@ -15,10 +15,40 @@ imgNames = { '../images/Easy.jpeg', '../images/Medium.jpeg', '../images/Hard.jpe
 outDir   = '../out';
 if ~exist(outDir, 'dir'), mkdir(outDir); end
 
+% ============================
+% CS4302 Practical 2 - Images
+% File: nuts_practical.m
+% ============================
+% Counts nuts and classifies them (almond / walnut / cashew)
+% in each difficulty image. Saves overlays and a CSV summary.
+
+clear; close all; clc;
+
+% Possible filenames for each difficulty (handles .jpg / .jpeg, caps etc.)
+nameOptions = {
+    {'Easy.jpeg','easy.jpeg','Easy.jpg','easy.jpg'}, ...
+    {'Medium.jpeg','medium.jpeg','Medium.jpg','medium.jpg'}, ...
+    {'Hard.jpeg','hard.jpeg','Hard.jpg','hard.jpg'}, ...
+    {'VeryHard.jpeg','VeryHard.jpg','veryhard.jpeg','veryhard.jpg','very_hard.jpg','very_hard.jpeg'}, ...
+    {'Extreme.jpeg','Extreme.jpg','extreme.jpeg','extreme.jpg'}
+};
+
+outDir = 'image_results';
+if ~exist(outDir,'dir'), mkdir(outDir); end
+
 allRows = {};   % rows for final CSV table
 
-for i = 1:numel(imgNames)
-    inName = imgNames{i};
+for i = 1:numel(nameOptions)
+
+    % ----- pick first existing filename for this difficulty -----
+    inName = '';
+    opts = nameOptions{i};
+    for k = 1:numel(opts)
+        if exist(opts{k},'file') == 2
+            inName = opts{k};
+            break;
+        end
+    end
 
     if isempty(inName)
         fprintf('No file found for image set %d, skipping.\n', i);
@@ -35,54 +65,42 @@ for i = 1:numel(imgNames)
         I = imresize(I, scale);
     end
 
-    %% ===== SEGMENTATION (Saturation only) =====
-    % Nuts are coloured; background is low-saturation.
+    %% ===== SEGMENTATION (HSV + Lab colour) =====
+    % Nuts are brown and fairly saturated; background is pale.
 
     Ihsv = rgb2hsv(I);
     S = Ihsv(:,:,2);
 
-    % simple threshold on saturation
-    mask = S > 0.20;
+    % keep pixels that are reasonably saturated (not white/grey)
+    mask1 = S > 0.20;
 
-    % clean-up: fill holes, smooth edges, remove tiny specks
-    mask = imfill(mask, 'holes');
-    mask = imopen(mask, strel('disk', 3));   % smooth small bumps
-    mask = imclose(mask, strel('disk', 2));  % close small gaps inside walnuts
-    mask = bwareaopen(mask, 300);           % drop very small blobs
+    Ilab = rgb2lab(I);
+    A = Ilab(:,:,2);
+    B = Ilab(:,:,3);
 
-    % final segmentation mask (no watershed)
-    seg = imopen(mask, strel('disk', 1));
-    seg = bwareaopen(seg, 300);
+    % brown-ish pixels (these thresholds work well for nuts on white paper)
+    mask2 = (A > 10) & (B > 10);
 
+    % combined mask
+    mask = mask1 & mask2;
+
+    % basic clean up
+    mask = imfill(mask,'holes');
+    mask = imopen(mask, strel('disk',3));
+    mask = bwareaopen(mask, 200);   % remove tiny blobs
+
+    % ----- avoid over-segmentation: NO watershed -----
+    % A small opening can break very thin connections between nuts,
+    % but will not slice each nut into many pieces.
+    seg = imopen(mask, strel('disk',1));
+    seg = bwareaopen(seg, 200);
 
     %% ===== LABEL OBJECTS AND MEASURE FEATURES =====
     CC = bwconncomp(seg);
-    fprintf('  Found %d raw regions (before size filtering).\n', CC.NumObjects);
+    fprintf('  Found %d candidate nuts.\n', CC.NumObjects);
 
     if CC.NumObjects == 0
         fprintf('  WARNING: no objects found, skipping this image.\n');
-        continue;
-    end
-
-    % --- area-based filtering to remove small fragments ---
-    areas   = cellfun(@numel, CC.PixelIdxList);   % area in pixels for each region
-    medArea = median(areas);                      % typical nut size (roughly almond)
-
-    % keep only regions that are at least half the median area
-    keepIdx = find(areas > 0.5 * medArea);
-
-    keepMask = false(size(seg));
-    for k = 1:numel(keepIdx)
-        keepMask(CC.PixelIdxList{keepIdx(k)}) = true;
-    end
-    seg = keepMask;
-
-    % recompute connected components AFTER filtering
-    CC = bwconncomp(seg);
-    fprintf('  After size filtering: %d candidate nuts.\n', CC.NumObjects);
-
-    if CC.NumObjects == 0
-        fprintf('  WARNING: no objects left after filtering, skipping.\n');
         continue;
     end
 
@@ -96,7 +114,6 @@ for i = 1:numel(imgNames)
     statsEntropy = regionprops(CC, E, 'MeanIntensity');
 
     labels = strings(CC.NumObjects,1);
-
 
     for n = 1:CC.NumObjects
         Areg  = props(n).Area;
