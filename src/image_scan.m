@@ -30,9 +30,10 @@ for i = 1:numel(imgNames)
     % ----- read image and optionally downscale -----
     I = imread(inName);
     maxDim = 1600;
-    scale = min(1, maxDim / max(size(I,1), size(I,2)));
-    if scale < 1
-        I = imresize(I, scale);
+    scale = min(1, max(size(I,1), size(I,2)) / maxDim);
+    if scale > 1
+        % if image is larger than maxDim, shrink it
+        I = imresize(I, 1/scale);
     end
 
     %% ===== SEGMENTATION (Saturation only) =====
@@ -46,14 +47,13 @@ for i = 1:numel(imgNames)
 
     % clean-up: fill holes, smooth edges, remove tiny specks
     mask = imfill(mask, 'holes');
-    mask = imopen(mask, strel('disk', 3));   % smooth small bumps
-    mask = imclose(mask, strel('disk', 2));  % close small gaps inside walnuts
-    mask = bwareaopen(mask, 300);           % drop very small blobs
+    mask = imopen(mask, strel('disk', 3));    % smooth small bumps
+    mask = imclose(mask, strel('disk', 2));   % close small gaps
+    mask = bwareaopen(mask, 200);            % drop very small blobs
 
     % final segmentation mask (no watershed)
     seg = imopen(mask, strel('disk', 1));
-    seg = bwareaopen(seg, 300);
-
+    seg = bwareaopen(seg, 200);
 
     %% ===== LABEL OBJECTS AND MEASURE FEATURES =====
     CC = bwconncomp(seg);
@@ -65,8 +65,8 @@ for i = 1:numel(imgNames)
     end
 
     % --- area-based filtering to remove small fragments ---
-    areas   = cellfun(@numel, CC.PixelIdxList);   % area in pixels for each region
-    medArea = median(areas);                      % typical nut size (roughly almond)
+    areas   = cellfun(@numel, CC.PixelIdxList);
+    medArea = median(areas);
 
     % keep only regions that are at least half the median area
     keepIdx = find(areas > 0.5 * medArea);
@@ -95,8 +95,11 @@ for i = 1:numel(imgNames)
     E = entropyfilt(Igray, true(9));           % local entropy
     statsEntropy = regionprops(CC, E, 'MeanIntensity');
 
-    labels = strings(CC.NumObjects,1);
+    %% ===== CLASSIFICATION =====
+    areas2      = [props.Area];
+    medAreaObj  = median(areas2);              % approx almond size
 
+    labels = strings(CC.NumObjects,1);
 
     for n = 1:CC.NumObjects
         Areg  = props(n).Area;
@@ -105,32 +108,30 @@ for i = 1:numel(imgNames)
         sol   = props(n).Solidity;
         maj   = props(n).MajorAxisLength;
         minr  = props(n).MinorAxisLength + eps;
-        ar    = maj / minr;                    % aspect ratio
-        circ  = 4*pi*Areg/(P^2);               % circularity
-        ent   = statsEntropy(n).MeanIntensity; % roughness
+        ar    = maj / minr;                       % aspect ratio
+        circ  = 4*pi*Areg/(P^2);                  % circularity
+        ent   = statsEntropy(n).MeanIntensity;    % roughness
+        normA = Areg / medAreaObj;                % area relative to almond size
 
-        % ----- simpler, more stable rules -----
-        % Almond: smooth and elongated
-        isAlmond = (ecc > 0.82) & (sol > 0.90) & (ar > 1.6);
-
-        % Walnut: more roundish, rough surface, less solid
-        isWalnut = (~isAlmond) & (ent > 4.5) & (sol < 0.92) & (circ < 0.85);
-
-        % Cashew: curved / crescent-like, quite elongated but less solid
-        isCashew = (~isAlmond) & (~isWalnut) & (ecc > 0.75) & (sol < 0.90) & (circ < 0.75);
-
-        if isAlmond
-            labels(n) = "almond";
-        elseif isWalnut
+        % ---- 1) Walnuts: clearly larger and rougher ----
+        if (normA > 1.8 && ent > 4.5) || (normA > 2.2)
             labels(n) = "walnut";
-        elseif isCashew
+
+        % ---- 2) Cashews: medium size, curved, lower circularity ----
+        elseif (normA > 0.7 && normA < 1.8 && ...
+                circ < 0.70 && sol < 0.96 && ecc > 0.60)
             labels(n) = "cashew";
+
+        % ---- 3) Almonds: smaller, smooth, elongated, fairly oval ----
+        elseif (ecc > 0.75 && sol > 0.90 && ar > 1.4 && circ >= 0.70)
+            labels(n) = "almond";
+
+        % ---- 4) Fallbacks: decide mainly by size & circularity ----
         else
-            % fallback: choose the "closest" type based on shape
-            if ar > 2 && sol > 0.9
-                labels(n) = "almond";
-            elseif circ < 0.7
+            if normA >= 1.8 && ent > 4.3
                 labels(n) = "walnut";
+            elseif circ < 0.70
+                labels(n) = "cashew";
             else
                 labels(n) = "almond";
             end
@@ -186,4 +187,4 @@ T = cell2table(allRows, ...
     'VariableNames', {'image','total','almond','walnut','cashew'});
 writetable(T, fullfile(outDir,'nut_counts_summary.csv'));
 
-disp('Done. Results saved in image_results/');
+disp('Done. Results saved in out/');
